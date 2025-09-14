@@ -1,3 +1,11 @@
+---
+title: "fdrSAFE on Platinum Spike Dataset - bootstrap results"
+author: "Jenna Landy"
+date: "2025-09-13"
+format:
+  pdf
+---
+
 ```{r}
 .libPaths("~/apps/R_4.1.0/")
 library(tidyverse)
