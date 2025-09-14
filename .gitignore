@@ -1,0 +1,4 @@
+.nfs*
+*/logs/*
+*/results/*
+experimental/GSE21344/*

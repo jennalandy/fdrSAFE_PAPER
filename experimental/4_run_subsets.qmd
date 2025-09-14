@@ -1,0 +1,539 @@
+---
+title: "fdrSAFE on Platinum Spike Dataset - Models on Subsets"
+author: "Jenna Landy"
+date: "2023-12-21"
+format:
+  pdf
+cache: TRUE
+execute:
+  warning: FALSE
+---
+
+```{r message = FALSE}
+.libPaths("~/apps/R_4.1.0/")
+
+results_dir = "results"
+figures_dir = "figures"
+
+source('helpers.R')
+load(file.path(data_dir, "1_platinum_data.RData"))
+```
+
+```{r message = FALSE}
+# remove.packages('fdrSAFE')
+# remotes::install_github('jennalandy/fdrSAFE')
+library(fdrSAFE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(ggthemes) 
+library(patchwork)
+library(locfdr)
+library(ggh4x)
+
+color_list = list(
+  "fdrSAFE" = "#E69F00",
+  "locfdr" = "#D55E00",
+  "fdrtool" = "#009E73",
+  "qvalue" = "#0072B2",
+  "grid" = "#999999",
+  "ensemble" = "#56B4E9",
+  "ensemble_all" = "#CC79A7"
+)
+```
+
+## Subset Analyses
+
+Goal: look at various subsets of the data with $\pi_0$ between 0.6 and 1. Plot metrics as a function of true $\pi_0$.
+
+```{r}
+table(platinum_data$fold_change$DE)
+```
+
+There are 5370 genes/hypotheses total, 3426 hypotheses are null and 1944 not-null. We let each subset be of size 1000. Sample 10 subsets of each size, and record metrics on fdr estimates as well as the 3 classification options on each.
+
+```{r}
+get_FDR_cutoff <- function(fdr, truth, FDR = 0.05) {
+  filtered = data.frame(fdr = fdr, truth = truth) %>%
+    arrange(fdr) %>%
+    mutate(
+      emp_FDR = cummean(fdr)
+    ) %>%
+    filter(emp_FDR < FDR) 
+  if (nrow(filtered) == 0) {
+    cutoff = 0
+    return(cutoff)
+  }
+    
+  cutoff = filtered %>%
+    last() %>%
+    pull(fdr)
+  return(cutoff)
+}
+```
+
+```{r eval = FALSE}
+set.seed(321)
+subset_n = 1000
+
+# consider pi0 0.6, 0.65, 0.7, ... 0.95
+# sample 10 subsets for each pi0
+subset_pi0_vec = rev(rep(seq(0.6, 0.95, by = 0.05), each = 10))
+all_subset_mets <- list()
+for (i in 1:length(subset_pi0_vec)) {
+  pi0 = subset_pi0_vec[i]
+  print(pi0)
+  subset = get_subset(pi0 = pi0)
+  
+  subset_fdrSAFE_res <- fdrSAFE(
+    subset$statistics,
+    verbose = FALSE,
+    df = 4,
+    locfdr_grid = build_locfdr_grid(
+      subset$statistics
+    ),
+    fdrtool_grid = build_fdrtool_grid(
+      subset$statistics
+    ),
+    qvalue_grid = build_qvalue_grid(
+      subset$statistics
+    ),
+    parallel = FALSE,
+    type = 'asymmetric'
+  )
+  subset_qvalue_res <- subset_fdrSAFE_res$default_qvalue
+  subset_fdrtool_res <- subset_fdrSAFE_res$default_fdrtool
+  subset_locfdr_res <- subset_fdrSAFE_res$default_locfdr
+  
+  fdrSAFE_cutoffs = c(
+    '0.2' = 0.2,
+    'pi0hat' = unname(quantile(
+      subset_fdrSAFE_res$fdr, 
+      1-unname(subset_fdrSAFE_res$pi0)
+    )),
+    'pi0true' = unname(quantile(
+      subset_fdrSAFE_res$fdr,
+      1-pi0
+    )),
+    "FDR" = get_FDR_cutoff(subset_fdrSAFE_res$fdr, subset$fold_change$DE)
+  )
+  fdrSAFE_metrics <- get_all_metrics(
+    'fdrSAFE',
+    subset_fdrSAFE_res$fdr, 
+    unname(subset_fdrSAFE_res$pi0),
+    subset,
+    cutoffs = fdrSAFE_cutoffs
+  )
+  
+  
+  fdrtool_cutoffs = c(
+    '0.2' = 0.2,
+    'pi0hat' = unname(quantile(
+      subset_fdrtool_res$lfdr, 
+      1-subset_fdrtool_res$param[1,'eta0']
+    )),
+    'pi0true' = unname(quantile(
+      subset_fdrtool_res$lfdr,
+      1-pi0
+    )),
+    "FDR" = get_FDR_cutoff(subset_fdrtool_res$lfdr, subset$fold_change$DE)
+  )
+  fdrtool_metrics <- get_all_metrics(
+    'fdrtool',
+    subset_fdrtool_res$lfdr, 
+    subset_fdrtool_res$param[1,'eta0'],
+    subset,
+    cutoffs = fdrtool_cutoffs
+  )
+  
+  qvalue_cutoffs = c(
+    '0.2' = 0.2,
+    'pi0hat' = unname(quantile(
+      subset_qvalue_res$lfdr, 
+      1-subset_qvalue_res$pi0
+    )),
+    'pi0true' = unname(quantile(
+      subset_qvalue_res$lfdr,
+      1-pi0
+    )),
+    "FDR" = get_FDR_cutoff(subset_qvalue_res$lfdr, subset$fold_change$DE)
+  )
+  qvalue_metrics <- get_all_metrics(
+    'qvalue',
+    subset_qvalue_res$lfdr, 
+    subset_qvalue_res$pi0,
+    subset,
+    cutoffs = qvalue_cutoffs
+  )
+  
+  if (is.null(subset_locfdr_res)) {
+    subset_locfdr_res <- locfdr(subset$statistics, pct0 = 0.001)
+  } 
+  
+  if (is.null(subset_locfdr_res)) {
+    print(paste('uh oh', pi0))
+    locfdr_metrics <- rep(NA, 47)
+    names(locfdr_metrics) <- names(fdrtool_metrics)
+    locfdr_metrics$method = 'locfdr'
+  } else {
+    locfdr_cutoffs = c(
+      '0.2' = 0.2,
+      'pi0hat' = unname(quantile(
+        subset_locfdr_res$fdr, 
+        1-subset_locfdr_res$fp0['mlest','p0']
+      )),
+      'pi0true' = unname(quantile(
+        subset_locfdr_res$fdr,
+        1-pi0
+      )),
+      "FDR" = get_FDR_cutoff(subset_locfdr_res$fdr, subset$fold_change$DE)
+    )
+    locfdr_metrics <- get_all_metrics(
+      'locfdr',
+      subset_locfdr_res$fdr, 
+      subset_locfdr_res$fp0['mlest','p0'],
+      subset,
+      cutoffs = locfdr_cutoffs
+    )
+  }
+  
+  subset_package_counts = subset_fdrSAFE_res$top_grid %>%
+    mutate(method = factor(method, levels = c('qvalue','locfdr','fdrtool'))) %>%
+    pull(method) %>%
+    table()
+  subset_package_counts['pi0'] = pi0
+  
+  subset_mets = rbind(
+    unlist(fdrSAFE_metrics),
+    unlist(locfdr_metrics),
+    unlist(fdrtool_metrics),
+    unlist(qvalue_metrics)
+  )
+  
+  subset_mets = data.frame(subset_mets)
+  subset_mets$pi0 = pi0
+  all_subset_mets[[i]] = subset_mets
+  saveRDS(all_subset_mets, file = file.path(results_dir, "subsets.rds")) 
+  # _2 after adding FDR cutoffs
+  
+  if (i == 1) {
+      all_package_counts = subset_package_counts
+  } else {
+      all_package_counts = rbind(
+          all_package_counts, 
+          subset_package_counts
+      )
+  }
+  write.csv(all_package_counts, file = file.path(results_dir, "subsets_counts.csv"))
+}
+```
+
+```{r}
+all_subset_mets <- readRDS(file.path(results_dir, "subsets.rds"))
+all_subset_mets <- do.call(rbind, all_subset_mets)
+head(all_subset_mets)
+
+all_package_counts <- read.csv(file.path(results_dir, "subsets_counts.csv"))
+head(all_package_counts)
+```
+
+
+## Plots
+
+Plot package use by fdrSAFE across pi0 values
+```{r}
+merge(
+    all_package_counts %>%
+        data.frame() %>%
+        group_by(pi0) %>%
+        summarize_all(function(x) {mean(x/10)}) %>%
+        pivot_longer(2:4, values_to = 'mean'),
+    all_package_counts %>%
+        data.frame() %>%
+        group_by(pi0) %>%
+        summarize_all(function(x) {x = x/10; sd(x)/sqrt(length(x))}) %>%
+        pivot_longer(2:4, values_to = 'se')
+) %>%
+    mutate(overall = "Inclusion in fdrSAFE") %>%
+    ggplot(aes(x = pi0, y = mean, fill = name, color = name)) +
+    facet_grid(cols = vars(overall)) +
+    geom_bar(stat = 'identity', position = 'dodge', alpha = 0.6) +
+    geom_errorbar(aes(ymin = mean - se, ymax = mean + se), position = 'dodge') +
+    scale_fill_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    scale_color_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    labs(
+        x = expression(pi[0]),
+        y = ''
+    ) +
+    theme(legend.position = "none") +
+    scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+    theme(
+        panel.grid.major.y = element_line(size = 0.2, color = 'darkgrey'),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.background = element_rect(fill = 'white', color = 'black')
+    ) +
+    scale_x_continuous(
+        breaks = seq(0.6, 0.95, by = 0.05)
+    ) +
+    theme(
+      text = element_text(size = 15)
+    )
+
+ggsave(file.path(figures_dir, "subsets_counts.png"), width = 8, height = 3)
+```
+
+## Plot cassification metrics
+```{r}
+# get mean and SE bars for each method
+plot_dat = all_subset_mets %>%
+  mutate(
+    pi0_SE = (as.numeric(pi0) - as.numeric(pi0hat))**2
+  ) %>%
+  dplyr::select(-starts_with("method_")) %>%
+  mutate(
+    method = ifelse(method == 'fdrSAFE','fdrSAFE',method)
+  ) %>%
+  group_by(method, pi0) %>%
+  summarize_all(
+    .funs = c(
+      center = function(vec) {
+        mean(as.numeric(vec), na.rm = TRUE)
+      },
+      lower = function(vec) {
+        if (length(vec) <= 1) {return(NA)}
+        vec = as.numeric(vec)
+        mean(vec, na.rm = TRUE) - sd(vec, na.rm = TRUE)/sqrt(sum(!is.na(vec)))
+      },
+      upper = function(vec) {
+        if (length(vec) <= 1) {return(NA)}
+        vec = as.numeric(vec)
+        mean(vec, na.rm = TRUE) + sd(vec, na.rm = TRUE)/sqrt(sum(!is.na(vec)))
+      }
+    )
+  )
+```
+
+```{r}
+# rearrange to have metric, center, loewr, and upper as their own columns
+plot_dat2 <- plot_dat %>%
+  dplyr::select(ends_with("center"), pi0, method) %>%
+  pivot_longer(ends_with("center"), names_to = 'metric', values_to = "center") %>%
+  mutate(metric = str_replace(metric, "_center", "")) %>%
+  merge(
+    plot_dat %>%
+      dplyr::select(ends_with("lower"), pi0, method) %>%
+      pivot_longer(ends_with("lower"), names_to = 'metric', values_to = "lower") %>%
+      mutate(metric = str_replace(metric, "_lower", "")),
+    by = c('method','pi0','metric')
+  ) %>%
+  merge(
+    plot_dat %>%
+      dplyr::select(ends_with("upper"), pi0, method) %>%
+      pivot_longer(ends_with("upper"), names_to = 'metric', values_to = "upper") %>%
+      mutate(metric = str_replace(metric, "_upper", "")),
+    by = c('method','pi0','metric')
+  )
+```
+
+```{r}
+# prepare for plotting
+plot_dat3 <- plot_dat2 %>%
+  filter(
+    grepl('_0.2', metric) |
+    grepl('_FDR', metric) | 
+    grepl('_pi0hat', metric) | 
+    grepl('_pi0true', metric)
+  )
+
+plot_dat3$cutoff_method = sapply(plot_dat3$metric, function(m) {
+  m_parts = str_split(m, '_')[[1]]
+  m_parts[length(m_parts)]
+})
+plot_dat3$metric = sapply(plot_dat3$metric, function(m) {
+  m_parts = str_split(m, '_')[[1]]
+  paste(m_parts[1:(length(m_parts)-1)], collapse = '_')
+})
+
+plot_dat3 <- plot_dat3 %>%
+  filter(
+    cutoff_method %in% c('0.2', 'pi0hat', 'pi0true','FDR')
+  )
+  
+plot_dat3 <- plot_dat3 %>%
+  filter(metric %in% c(
+    'global_FDR', 'specificity', 'sensitivity', 'prop_pred_T'
+  )) %>%
+  mutate(
+    cutoff_method = factor(
+      cutoff_method,
+      levels = c("pi0true", "pi0hat", "0.2",  "FDR"),
+      labels = c('~ pi[0] ~ -"Based Cutoff"',
+                 '~ hat(pi)[0] ~ -"Based Cutoff"',
+                 '"Standard 0.2 Cutoff"',
+                 '"FDR-Based Cutoff"')
+    ),
+    metric = factor(
+      metric,
+      levels = c('global_FDR', 'specificity', 'sensitivity', 'prop_pred_T'),
+      labels = c(
+        '"Global FDR"','"Specificity"','"Sensitivity"',
+        '"Proportion of Tests\nPredicted Not-Null"'
+      )
+    )
+  )
+  
+# plot
+plot_dat3 %>%
+  ggplot(aes(x = pi0, y = center, color = method)) +
+  facet_grid(
+    rows = vars(cutoff_method), 
+    cols = vars(metric),
+    scales = 'free',
+    switch = "y",
+    labeller = label_parsed
+  ) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower, ymax = upper)) +
+  scale_color_manual(
+    breaks = names(color_list),
+    values = unlist(color_list)
+  ) +
+  labs(
+    x = expression(pi[0])
+  ) +
+  scale_y_continuous(position = 'right') +
+  theme(
+    strip.text.y.left = element_text(angle = 0),
+    axis.title.y.right = element_blank(),
+    legend.position = 'none',
+    legend.title = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_rect(fill = NA),
+    legend.key = element_blank()
+  ) +
+  theme(
+    text = element_text(size = 15)
+  )
+
+ggsave(file.path(figures_dir, "subsets_classification_metrics.png"), width = 8, height = 5)
+```
+
+
+## Plot fdr metrics
+```{r fig.height = 3, fig.width = 10}
+lines = data.frame(
+  metric = factor(
+    c('pr','roc','Fdr.MSE','brier','pi0hat.X1'),
+    levels = c('pr','roc','Fdr.MSE','brier','pi0hat.X1'),
+    labels = c('"PR AUC"','"ROC AUC"','"Fdr MSE"','"Brier Score"','hat(pi)[0]')
+  ),
+  intercept = c(1, 1, 0, 0, 0),
+  slope = c(0,0,0,0,1)
+)
+
+scales_y <- list(
+  `brier` = scale_y_continuous(limits = c(0.8, 1)),
+  `Fdr.MSE` = scale_y_continuous(limits = c(0.83, 1)),
+  `pr` = scale_y_continuous(limits = c(0, 0.16)),
+  `roc` = scale_y_continuous(limits = c(0, 0.21)),
+  `pi0` = scale_y_continuous(limits = c(0.55, 1))
+)
+
+plot_dat2 %>%
+  filter(metric %in% c('pr','roc','Fdr.MSE','brier','pi0hat')) %>%
+  mutate(
+    metric = factor(
+      metric,
+      levels = c('pr','roc','Fdr.MSE','brier','pi0hat'),
+      labels = c('"PR AUC"','"ROC AUC"','"Fdr MSE"','"Brier Score"','hat(pi)[0]')
+    )
+  ) %>%
+  ggplot(aes(x = pi0, y = center, color = method)) +
+  facet_wrap(
+    ~ metric, 
+    nrow = 1,
+    scales = 'free',
+    labeller = label_parsed
+  ) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower, ymax = upper)) +
+  scale_color_manual(
+    breaks = names(color_list),
+    values = unlist(color_list)
+  ) +
+  labs(
+    x = expression(pi[0])
+  ) +
+  theme(
+    axis.title.y = element_blank(),
+    legend.position = 'bottom',
+    legend.title = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_rect(fill = NA),
+    legend.key = element_blank()
+  ) +
+  geom_abline(data = lines, aes(intercept = intercept, slope = slope)) +
+  ggh4x::facetted_pos_scales(
+    y = scales_y
+  )  +
+  theme(
+    legend.position = 'top',
+    legend.text = element_text(size = 15)
+  ) +
+  theme(
+    text = element_text(size = 15)
+  )
+
+ggsave(file.path(figures_dir, "subsets_fdr_metrics.png"), width = 8, height = 3)
+```
+
+# Combine figures for supp. Fig C.2
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(grid)
+library(png)
+
+figures_dir = "figures"
+
+# Load the images
+fig_a <- readPNG(file.path(figures_dir, "subsets_fdr_metrics.png"))
+fig_b <- readPNG(file.path(figures_dir, "subsets_classification_metrics.png"))
+
+heights <- c(dim(fig_a)[1], dim(fig_b)[1] ) # dim(fig_b)[1], dim(fig_d)[1]
+relative_heights <- heights / sum(heights)
+
+# Create a function to add labels to images
+add_label <- function(image, label, shift_y = 0.05) {
+  grid::grid.raster(image)
+  grid::grid.text(label, x = 0, y = 1 - shift_y, just = c("left", "top"), gp = gpar(fontsize = 50, col = "black", fontface = "bold"))
+}
+
+# Open a new graphics device to save the stacked image
+png(file.path(figures_dir, "subsets.png"), width = dim(fig_b)[2], height = sum(heights))
+
+# Create a stacked layout
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(2, 1, heights = relative_heights)))
+
+# Add each image with a label to the layout
+pushViewport(viewport(layout.pos.row = 1, layout.pos.col = 1))
+add_label(fig_a, "A", shift_y = 0.24)
+popViewport()
+
+pushViewport(viewport(layout.pos.row = 2, layout.pos.col = 1))
+add_label(fig_b, "B")
+popViewport()
+
+# Close the graphics device
+dev.off()
+```

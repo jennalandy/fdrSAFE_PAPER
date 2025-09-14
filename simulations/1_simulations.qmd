@@ -1,0 +1,383 @@
+---
+title: "Gridsemble on Synthetic Datasets - Simulation Results"
+author: "Jenna Landy"
+date: "2023-12-21"
+format:
+  pdf
+---
+
+This script generates the figures for the simulation results. It assumes that all slurm jobs have been run and the results are in the `results` directory. It produces Figure 1 and Supplementary Figure A.1.
+
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(cowplot)
+library(tidyverse)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+
+source("helpers.R") # defines load_res,color_list, color_labels
+
+results_dirs = list(
+    'Symmetric' = "results/test_symmetric",
+    'Asymmetric' = "results/test_asymmetric",
+    'COD based' = "results/test_COD_based"
+)
+
+figures_dir = "figures"
+```
+
+```{r}
+symmetric_res <- load_res(results_dirs[["Symmetric"]], "Symmetric")
+metrics = do.call(rbind, lapply(names(results_dirs), function(study) {
+    res <- load_res(results_dirs[[study]], study)
+    res[,colnames(symmetric_res)]
+}))
+
+table(metrics$method)
+
+metrics %>%
+    group_by(study) %>%
+    summarize(length(unique(i)))
+```
+
+
+```{r}
+plot_mets = list(
+    'sqrt_fdrerror' = 'fdr/Fdr RMSE',
+    'brier' = 'Test Label\nBrier Score',
+    'pr' = 'PR AUC',
+    'roc' = 'ROC AUC',
+    'pi0' = 'Estimated\nProp. Null'
+)
+optimal = data.frame(
+    'brier' = 0,
+    'sqrt_fdrerror' = 0,
+    'pr' = 1,
+    'roc' = 1,
+    'pi0' = 0.8,
+    'study' = names(results_dirs)
+) %>%
+    pivot_longer(1:5, names_to = 'metric', values_to = 'optimal') %>%
+    mutate(
+        metric = factor(unlist(plot_mets[metric]), levels = plot_mets),
+        study = factor(study, levels = names(results_dirs))
+    )
+
+method_order = c(
+    'oracle ensemble', 'oracle',
+    'fdrtool','locfdr','qvalue',
+    'fdrSAFE',
+    'fdrSAFE_selection-only','fdrSAFE_ensemble-only','fdrSAFE_ensemble-all'
+)
+plot_dat <- metrics %>%
+    mutate(
+        sqrt_fdrerror = sqrt(fdrerror)
+    ) %>%
+    dplyr::select(
+        method, study, names(plot_mets)
+    ) %>%
+    pivot_longer(
+        3:(3 + length(plot_mets) - 1),
+        names_to = 'metric',
+        values_to = 'value'
+    ) %>%
+    mutate(
+        metric = factor(unlist(plot_mets[metric]), levels = plot_mets),
+        study = factor(study, levels = names(results_dirs)),
+        method = factor(method, levels = rev(method_order)),
+        category = case_when(
+            method %in% c('fdrtool','locfdr','qvalue') ~ 'Baseline',
+            method %in% c('oracle','oracle ensemble') ~ 'Oracle',
+            TRUE ~ 'Novel'
+        ),
+        category_alpha = case_when(
+            category == 'Baseline' ~ 0.4,
+            category == 'Oracle' ~ 1,
+            TRUE ~ 0
+        )
+    ) 
+```
+
+## Figure 1: simulation results
+
+Figure 1b: simulation metrics
+```{r}
+sim_res <- plot_dat %>%
+    ggplot(aes(x = value, color = method, fill = method, alpha = category_alpha)) +
+    facet_grid(cols = vars(metric), rows = vars(study), scales = 'free', switch = 'y') +
+    geom_vline(data = optimal, aes(xintercept = optimal)) +
+    geom_hline(yintercept = -0.0375, linetype = 2) + # separates novel from new
+    geom_hline(yintercept = 0.21, linetype = 2) + # separates oracle from new
+    geom_boxplot() +
+    labs(
+        fill = 'Method: ',
+        color = 'Method: '
+    ) +
+    theme_bw() +
+    theme(
+        text = element_text(size = 20),
+        axis.text = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.direction = "horizontal",
+        legend.justification = 'left',
+        strip.text.y = element_blank(), 
+        plot.margin = margin(t = 5, r = 3, b = 0, l = 3, unit = "mm")
+    ) +
+    scale_alpha_continuous(breaks = c(0, 0.4, 1), labels = c('Novel','Baseline','Oracle')) +
+    guides(
+        fill = guide_legend(nrow = 3, byrow = TRUE, order = 1),
+        color = guide_legend(nrow = 3, byrow = TRUE, order = 1),
+        alpha = guide_legend(
+            override.aes = list(
+                fill = c("black", "black", "black"),
+                alpha = c(1, 0.5, 0)
+            ),
+            title = "Method Category: ",
+            nrow = 3,
+            order = 2,
+            reverse = TRUE
+        )
+    ) +
+    scale_fill_manual(
+        breaks = names(color_list[method_order]),
+        values = unlist(color_list[method_order]),
+        labels = color_labels[method_order]
+    ) +
+    scale_color_manual(
+        breaks = names(color_list[method_order]),
+        values = unlist(color_list[method_order]),
+        labels = color_labels[method_order]
+    )
+legend_color <- get_legend(sim_res + guides(alpha = 'none'))
+legend_alpha <- get_legend(sim_res + guides(color = 'none', fill = 'none'))
+sim_res <- sim_res + theme(legend.position = 'none')
+```
+
+Figure 1c: simulation counts
+```{r}
+counts_res <- read.csv(file.path(results_dirs[["Asymmetric"]], "fdrSAFE_package_counts.csv")) %>%
+    mutate(
+        study = 'Asymmetric'
+    ) %>%
+    rbind(
+        read.csv(file.path(results_dirs[["Symmetric"]], "fdrSAFE_package_counts.csv")) %>%
+        mutate(
+            study = 'Symmetric'
+        )
+    ) %>%
+    rbind(
+        read.csv(file.path(results_dirs[["COD based"]], "fdrSAFE_package_counts.csv")) %>%
+        mutate(
+            study = 'COD based'
+        )
+    ) %>%
+    pivot_longer(1:3, names_to = 'method', values_to = 'counts') %>%
+    mutate(name = "Inclusion in\nGridsemble") %>%
+    ggplot(aes(x = counts, y = method, color = method, fill = method)) +
+    facet_grid(rows = vars(study), cols = vars(name)) +
+    geom_boxplot(alpha = 0.2) +
+    scale_fill_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    scale_color_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    theme_bw() +
+    theme(
+        text = element_text(size = 20),
+        axis.text = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = 'none',
+        axis.title = element_blank(),
+        strip.text.y = element_blank(),
+        plot.margin = margin(t = 5, r = 3, b = 0, l = 3, unit = "mm")
+    )
+```
+
+Figure 1a: simulation distributions
+```{r}
+set.seed(321)
+source("test_symmetric_setupforplot.R")
+symmetric_dat <- data_generating_fn()
+source("test_asymmetric_setupforplot.R")
+asymmetric_dat <- data_generating_fn()
+source("test_COD_based_setupforplot.R")
+COD_dat <- data_generating_fn()
+
+data_plot <- data.frame(
+    t = c(symmetric_dat$zz, asymmetric_dat$zz, COD_dat$zz),
+    truth = c(symmetric_dat$truth, asymmetric_dat$truth, COD_dat$truth),
+    study = c(
+        rep('Symmetric', 1000), rep('Asymmetric', 1000), rep('COD based', length(COD_dat$zz))
+    ),
+    name = 'Test Statistic\nDistribution'
+) %>%
+    mutate(study = factor(study, levels = c('Symmetric','Asymmetric','COD based'))) %>%
+    ggplot(aes(x = t, fill = truth)) + 
+    facet_grid(rows = vars(study), cols = vars(name), switch = 'y') +
+    geom_histogram(position = 'identity', alpha = 0.4, bins = 20) +
+    theme_bw() +
+    theme(
+        legend.position = 'none',
+        text = element_text(size = 20),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_blank(),
+        plot.margin = margin(t = 5, r = 3, b = 0, l = 3, unit = "mm")
+    ) +
+    scale_fill_manual(
+        breaks = c(FALSE, TRUE),
+        values = c('black','red')
+    )
+```
+
+
+Figure 1 combined
+```{r}
+label_plot <- function(plot, label, offset = 0) {
+  # Convert to grob if it's a ggplot object
+  if (inherits(plot, "gg")) {
+    plot <- ggplotGrob(plot)
+  }
+  
+  # Create label grob
+  label_grob <- textGrob(label, 
+                         x = unit(6, "mm") + unit(offset, "mm"), 
+                         y = unit(1, "npc"),
+                         just = c("left", "top"),
+                         gp = gpar(fontface = "bold", fontsize = 14))
+  
+  # Overlay the label
+  grobTree(plot, label_grob)
+}
+
+spacer <- rectGrob(gp = gpar(col = NA))  
+plot_grob <- arrangeGrob(
+    arrangeGrob(
+        label_plot(data_plot, 'A', offset = 8), 
+        label_plot(sim_res, 'B'), 
+        label_plot(counts_res, 'C'), 
+        nrow = 1, widths = c(1.2, 5, 1)
+    ),
+    arrangeGrob(
+        spacer, legend_color, legend_alpha, spacer, nrow = 1, widths = c(1, 7, 3, 1)
+    ), 
+    nrow = 2, heights = c(10, 2)
+)
+
+ggsave(file.path(figures_dir, "simulations.png"), plot = plot_grob, width = 15, height = 11)
+```
+
+## Supplementary Table B.1: simulation metrics
+```{r}
+metrics %>%
+    mutate(
+        sqrt_fdrerror = sqrt(fdrerror)
+    ) %>%
+    dplyr::select(
+        method, study, names(plot_mets)
+    ) %>%
+    group_by(study, method) %>%
+    summarize_all(function(col) { round(median(col), 3) }) %>%
+    mutate(
+        study = factor(study, levels = c('Symmetric','Asymmetric','COD based')),
+        method = factor(method, method_order)
+    ) %>%
+    arrange(study, method) %>%
+    kable(format = "latex")
+```
+
+## Supp. Figure A.1: increasing sample size and number of synthetic datasets
+
+```{r}
+results_dirs_hyperparameters = list(
+    'Asymmetric' = "results/test_asymmetric_hyperparameters",
+    'Symmetric' = "results/test_symmetric_hyperparameters"
+)
+
+p <- read.csv(file.path(results_dirs_hyperparameters[["Asymmetric"]], "ensemble_metrics.csv")) %>%
+    mutate(method = 'fdrSAFE_ensemble-only') %>%
+    rbind(
+        read.csv(file.path(results_dirs_hyperparameters[["Asymmetric"]], "fdrSAFE_metrics.csv")) %>%
+            mutate(method = 'fdrSAFE')
+    ) %>%
+    ggplot(aes(y = fdrerror, color = method, fill = method)) +
+    facet_grid(rows = vars(n_synthetic), cols = vars(ensemble_size), switch = 'both') +
+    geom_boxplot(alpha = 0.3) +
+    theme_bw() +
+    scale_fill_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    scale_color_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    scale_y_continuous(position = 'right') +
+    theme(
+        legend.position = 'none',
+        text = element_text(size = 20),
+        axis.text = element_text(size = 15),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y.left = element_text(),
+        axis.title.y.right = element_blank() ,
+        plot.title = element_text(hjust = 0.5)  
+    ) +
+    labs(x = 'Ensemble Size', y = 'Number of Synthetic Datasets', color = 'Method', title = 'Asymmetric')
+y_title <- textGrob("Number of Synthetic Datasets", rot = 90, gp = gpar(fontsize = 20))
+plot_grob_asymmetric <- arrangeGrob(p, left = y_title)
+
+p <- read.csv(file.path(results_dirs_hyperparameters[["Symmetric"]], "ensemble_metrics.csv")) %>%
+    mutate(method = 'fdrSAFE_ensemble-only') %>%
+    rbind(
+        read.csv(file.path(results_dirs_hyperparameters[["Symmetric"]], "fdrSAFE_metrics.csv")) %>%
+            mutate(method = 'fdrSAFE')
+    ) %>%
+    ggplot(aes(y = fdrerror, color = method, fill = method)) +
+    facet_grid(rows = vars(n_synthetic), cols = vars(ensemble_size), switch = 'both') +
+    geom_boxplot(alpha = 0.3) +
+    theme_bw() +
+    scale_fill_manual(
+        breaks = names(color_list),
+        values = unlist(color_list),
+        labels = color_labels
+    ) +
+    scale_color_manual(
+        breaks = names(color_list),
+        values = unlist(color_list),
+        labels = color_labels
+    ) +
+    scale_y_continuous(position = 'right') +
+    theme(
+        text = element_text(size = 20),
+        axis.text = element_text(size = 15),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y.left = element_text(),
+        axis.title.y.right = element_blank(),
+        plot.title = element_text(hjust = 0.5)
+    ) +
+    labs(x = 'Ensemble Size', y = 'Number of Synthetic Datasets', color = '', fill = '', title = 'Symmetric')
+legend <- get_legend(p + theme(legend.direction = 'horizontal', legend.text = element_text(size = 20)))
+p <- p + theme(legend.position = 'none')
+y_title <- textGrob("Number of Synthetic Datasets", rot = 90, gp = gpar(fontsize = 20))
+plot_grob_symmetric <- arrangeGrob(p, left = y_title)
+
+plot_grob <- arrangeGrob(
+    arrangeGrob(plot_grob_symmetric, plot_grob_asymmetric, nrow = 1),
+    legend, nrow = 2, heights = c(10, 1)
+)
+
+ggsave(file.path(figures_dir, "increasing_n.png"), plot = plot_grob, width = 12, height = 6)
+```

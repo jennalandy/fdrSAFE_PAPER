@@ -1,0 +1,534 @@
+---
+title: "fdrSAFE on Platinum Spike Dataset - Models on All Data"
+author: "Jenna Landy"
+date: "2025-09-13"
+format:
+  pdf
+---
+
+```{r message = FALSE}
+.libPaths("~/apps/R_4.1.0/")
+
+data_dir = "data"
+results_dir = "results"
+figures_dir = "figures"
+
+source('helpers.R')
+load(file.path(data_dir, "1_platinum_data.RData"))
+```
+
+```{r message = FALSE, warning = FALSE}
+# remove.packages('fdrSAFE')
+# remotes::install_github("jennalandy/fdrSAFE")
+library(fdrSAFE)
+```
+
+```{r message = FALSE}
+library(locfdr)
+library(fdrtool)
+library(qvalue)
+library(tidyverse)
+library(ggplot2)
+library(ggthemes)
+library(ggdist)
+library(cowplot)
+library(grid)
+library(gridExtra)
+
+color_list = list(
+  "fdrSAFE" = "#D55E00",
+  "locfdr" = "#56B4E9",
+  "fdrtool" = "#009E73",
+  "qvalue" = "#0072B2",
+  "grid" = "#E69F00",
+  "ensemble" = "#CC79A7",
+  "ensemble all" = "#F0E442",
+  "oracle" = "#000000",
+  "oracle ensemble" = "#999999"
+)
+
+methods_order = c('fdrSAFE','locfdr','fdrtool','qvalue')
+```
+
+## Visualization
+
+```{r}
+p1 <- data.frame(
+  t = platinum_data$statistics,
+  truth = ifelse(platinum_data$fold_change$DE, 'Not Null', 'Null'),
+  p = p_from_t(platinum_data$statistics, df = 4)
+) %>%
+  ggplot(aes(x = t, fill = truth)) +
+  theme_bw() +
+  labs(
+    x = 't-statistic',
+    y = 'Count',
+    fill = 'Hypothesis Status'
+  ) +
+  geom_histogram(position = 'identity', alpha = 0.4, bins = 70) +
+  theme(
+    legend.position = 'top'
+  ) +
+  scale_fill_manual(
+    values = list('Not Null'='red','Null'='black')
+  )
+p2 <- data.frame(
+  t = platinum_data$statistics,
+  truth = ifelse(platinum_data$fold_change$DE, 'Not Null', 'Null'),
+  p = p_from_t(platinum_data$statistics, df = 4)
+) %>%
+  ggplot(aes(x = p, fill = truth)) +
+  theme_bw() +
+  labs(
+    x = 'p-value',
+    y = 'Count',
+    fill = 'Hypothesis Status'
+  ) +
+  geom_histogram(position = 'identity', alpha = 0.4, bins = 70) +
+  theme(
+    legend.position = 'none'
+  ) +
+  scale_fill_manual(
+    values = list('Not Null'='red','Null'='black')
+  )
+
+plot_grid(
+  p1, p2,
+  ncol = 1,               # Arrange plots in one column
+  rel_heights = c(5,4)   # Set relative heights (p1 is twice as tall as p2)
+)
+ggsave(file.path(figures_dir, "platinum_dist.png"))
+```
+
+## Run Methods
+
+### Benchmarks
+
+`locfdr` fails with default `pct0 = 0` because there are a few extreme outlier. We use `pct0 = 0.001` instead.
+
+```{r, warning = FALSE}
+locfdr_res <- locfdr(platinum_data$statistics, pct0 = 0.001)
+fdrtool_res <- fdrtool(platinum_data$statistics, plot = 0)
+qvalue_res <- qvalue(p_from_t(platinum_data$statistics, df = 4))
+
+list(
+  'locfdr' = unlist(locfdr_res$fp0['mlest','p0']),
+  'fdrtool' = unname(fdrtool_res$param[,'eta0']),
+  'qvalue' = qvalue_res$pi0
+)
+
+all(qvalue_res$pvalues == p_from_t(platinum_data$statistics, df = 4))
+```
+
+Note that the `df` mentioned in the warning of `locfdr` refers to the degrees of freedom for fitting the marginal distribution $f$, NOT the degrees of freedom of our test-statistics.
+
+### fdrSAFE
+
+`fdrSAFE` takes in test statistics and, if known, the degrees of freedom for each test. In our case, there are 3 samples in each condition, so `df = (3-1) + (3-1) = 4`.
+```{r}
+set.seed(321)
+
+fdrSAFE_res <- fdrSAFE(
+  platinum_data$statistics,
+  df = 4,
+  parallel = FALSE,
+  type = 'asymmetric'
+)
+```
+
+## Evaluate Methods
+
+```{r}
+data.frame(
+  t = platinum_data$statistics,
+  fdrSAFE = fdrSAFE_res$fdr,
+  locfdr = locfdr_res$fdr,
+  fdrtool = fdrtool_res$lfdr,
+  qvalue = qvalue_res$lfdr
+) %>%
+  pivot_longer(2:5, names_to = 'method', values_to = 'fdr') %>%
+  ggplot(aes(x = t, y = fdr, color = method)) +
+  geom_line() +
+  theme_bw() +
+  theme(
+    legend.position = 'top'
+  ) +
+  labs(x = 't-statistic', y = 'estimated fdr', color = '') +
+  scale_color_manual(
+    breaks = names(color_list),
+    values = unlist(color_list)
+  )
+ggsave(file.path(figures_dir, "estimated_fdr.png"), height = 3, width = 5)
+```
+
+### pi0 estimates
+```{r}
+list(
+  'true' = mean(1 - platinum_data$fold_change$DE),
+  'fdrSAFE' = fdrSAFE_res$pi0,
+  'locfdr' = unlist(locfdr_res$fp0['mlest','p0']),
+  'fdrtool' = unname(fdrtool_res$param[,'eta0']),
+  'qvalue' = qvalue_res$pi0
+)
+```
+
+
+### fdr metrics
+```{r}
+how = "symmetric"
+platinum_data$Fdr = get_true_Fdr(
+  platinum_data$statistics, 
+  platinum_data$fold_change$DE,
+  how = how
+)
+
+fdr_metrics = rbind(
+  method_metrics(
+    'fdrSAFE',
+    estimated_fdr = fdrSAFE_res$fdr, 
+    test_statistics = platinum_data$statistics,
+    hypothesis_labels = platinum_data$fold_change$DE,
+    true_Fdr = platinum_data$Fdr,
+    how_Fdr = how
+  ),
+  method_metrics(
+    'locfdr',
+    estimated_fdr = locfdr_res$fdr, 
+    test_statistics = platinum_data$statistics,
+    hypothesis_labels = platinum_data$fold_change$DE,
+    true_Fdr = platinum_data$Fdr,
+    how_Fdr = how
+  ),
+  method_metrics(
+    'fdrtool',
+    estimated_fdr = fdrtool_res$lfdr, 
+    test_statistics = platinum_data$statistics,
+    hypothesis_labels = platinum_data$fold_change$DE,
+    true_Fdr = platinum_data$Fdr,
+    how_Fdr = how
+  ),
+  method_metrics(
+    'qvalue',
+    estimated_fdr = qvalue_res$lfdr, 
+    test_statistics = platinum_data$statistics,
+    hypothesis_labels = platinum_data$fold_change$DE,
+    true_Fdr = platinum_data$Fdr,
+    how_Fdr = how
+  )
+)
+
+fdr_metrics = data.frame(fdr_metrics)
+fdr_metrics$pi0 = c(
+  fdrSAFE_res$pi0, 
+  unlist(locfdr_res$fp0['mlest','p0']), 
+  unname(fdrtool_res$param[,'eta0']),
+  qvalue_res$pi0
+)
+write.csv(fdr_metrics, file.path(results_dir, "platinum_fdr_metrics.csv"))
+fdr_metrics
+```
+
+
+### Calibration
+
+```{r fig.height = 6, fig.width = 6}
+p1 <- plot_calibration(
+  fdrs = list(
+    "fdrSAFE" = fdrSAFE_res$fdr,
+    "locfdr" = locfdr_res$fdr,
+    "fdrtool" = fdrtool_res$lfdr,
+    "qvalue" = qvalue_res$lfdr
+  ),
+  truth = platinum_data$fold_change$DE,
+  y_axis = 'mean_fdr'
+)
+
+get_calib_dat(fdrs = list(
+    "locfdr" = locfdr_res$fdr
+  ),
+  truth = platinum_data$fold_change$DE)
+
+compute_FDR_calib <- function(fdr, truth, method) {
+  cutoffs = unique(sort(fdr))
+  nominal_FDR = sapply(cutoffs, function(c) {
+    mean(fdr[fdr <= c])
+  })
+  true_FDR = sapply(cutoffs, function(c) {
+    mean(1 - truth[fdr <= c])
+  })
+  return(data.frame(
+    method = method,
+    nominal = nominal_FDR,
+    true = true_FDR
+  ))
+}
+method_fdrs <- list(
+  "fdrSAFE" = fdrSAFE_res$fdr,
+  "locfdr" = locfdr_res$fdr,
+  "fdrtool" = fdrtool_res$lfdr,
+  "qvalue" = qvalue_res$lfdr
+)
+FDR_calib_dat <- do.call(rbind, lapply(names(method_fdrs), function(method) {
+  compute_FDR_calib(
+    fdr = method_fdrs[[method]],
+    truth = platinum_data$fold_change$DE,
+    method = method
+  )
+}))
+p2 <- FDR_calib_dat %>%
+  ggplot(aes(x = nominal, y = true, color = method)) +
+  geom_abline(linetype = 2, color = 'grey') +
+  geom_point(size = 0.5, alpha = 0.8) +
+  theme_bw() +
+  theme(
+      legend.title = element_blank(),
+      legend.position = 'bottom'
+  ) +
+  scale_color_manual(
+      breaks = names(color_list),
+      values = unlist(color_list)
+  ) +
+  labs(x = "Estimated Global FDR", y = "True Global FDR")
+
+extract_legend <- function(plot) {
+  g <- ggplotGrob(plot)
+  legend <- g$grobs[which(sapply(g$grobs, function(x) x$name) == "guide-box")][[1]]
+  return(legend)
+}
+shared_legend <- extract_legend(
+  p2 + 
+  theme(legend.text = element_text(size = 12)) +
+  guides(color = guide_legend(override.aes = list(size = 3)))
+)
+
+library(cowplot)
+labeled_plot <- grid.arrange(
+  arrangeGrob(
+    p1 + theme(legend.position = "none"), 
+    p2 + theme(legend.position = "none"), 
+    ncol = 2
+  ),
+  shared_legend,
+  nrow = 2,
+  heights = c(10, 1)
+)
+final_plot <- ggdraw(labeled_plot) +
+  draw_plot_label(
+    label = c("A", "B"),
+    x = c(0.0, 0.5),
+    y = c(1, 1),
+    size = 14
+  ) + 
+  theme(legend.text = element_text(size = 12)) +
+  guides(color = guide_legend(override.aes = list(size = 3)))
+ggsave(file.path(figures_dir, "calibration.png"), final_plot, height = 6, width = 10, bg = "white")
+```
+
+```{r}
+lapply(method_fdrs, function(method) {mean(method == 0)})
+lapply(method_fdrs, function(method) {mean(method == 1)})
+lapply(method_fdrs, function(method) {max(method)})
+lapply(method_fdrs, function(method) {mean(method >= 0.99)})
+```
+
+### Classification Metrics (supplement)
+
+#### est FDR-based cutoff
+
+```{r}
+get_FDR_cutoff <- function(fdr, truth, FDR = 0.05) {
+  filtered = data.frame(fdr = fdr, truth = truth) %>%
+    arrange(fdr) %>%
+    mutate(
+      emp_FDR = cummean(fdr)
+    ) %>%
+    filter(emp_FDR < FDR) 
+  if (nrow(filtered) == 0) {
+    cutoff = 0
+    return(cutoff)
+  }
+    
+  cutoff = filtered %>%
+    last() %>%
+    pull(fdr)
+  return(cutoff)
+}
+
+fdrSAFE_cutoff <- get_FDR_cutoff(fdrSAFE_res$fdr, platinum_data$fold_change$DE)
+locfdr_cutoff <- get_FDR_cutoff(locfdr_res$fdr, platinum_data$fold_change$DE)
+fdrtool_cutoff <- get_FDR_cutoff(fdrtool_res$lfdr, platinum_data$fold_change$DE)
+qvalue_cutoff <- get_FDR_cutoff(qvalue_res$lfdr, platinum_data$fold_change$DE)
+
+classification_metrics_cutoff_FDR = rbind(
+  classification_metrics(
+    method = 'fdrSAFE',
+    fdr = fdrSAFE_res$fdr, 
+    pi0 = fdrSAFE_res$pi0,
+    test_statistics = platinum_data$statistics,
+    truth = platinum_data$fold_change$DE, 
+    cutoff = fdrSAFE_cutoff
+  ),
+  classification_metrics(
+    'locfdr',
+    locfdr_res$fdr,
+    locfdr_res$fp0['mlest','p0'],
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = locfdr_cutoff
+  ),
+  classification_metrics(
+    'fdrtool',
+    fdrtool_res$lfdr, 
+    fdrtool_res$param[1,'eta0'],
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = fdrtool_cutoff
+  ),
+  classification_metrics(
+    'qvalue',
+    qvalue_res$lfdr, 
+    qvalue_res$pi0,
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = qvalue_cutoff
+  )
+)
+
+classification_metrics_cutoff_FDR
+```
+
+#### 0.2 cutoff
+
+```{r}
+cutoff = 0.2
+
+classification_metrics_cutoff0.2 = rbind(
+  classification_metrics(
+    method = 'fdrSAFE',
+    fdr = fdrSAFE_res$fdr, 
+    pi0 = fdrSAFE_res$pi0,
+    test_statistics = platinum_data$statistics,
+    truth = platinum_data$fold_change$DE, 
+    cutoff = cutoff
+  ),
+  classification_metrics(
+    'locfdr',
+    locfdr_res$fdr,
+    locfdr_res$fp0['mlest','p0'],
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = cutoff
+  ),
+  classification_metrics(
+    'fdrtool',
+    fdrtool_res$lfdr, 
+    fdrtool_res$param[1,'eta0'],
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = cutoff
+  ),
+  classification_metrics(
+    'qvalue',
+    qvalue_res$lfdr, 
+    qvalue_res$pi0,
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = cutoff
+  )
+)
+
+classification_metrics_cutoff0.2
+```
+
+#### cutoff based on $\hat\pi_0$
+
+```{r}
+fdrSAFE_cutoff <- quantile(fdrSAFE_res$fdr, 1-fdrSAFE_res$pi0)
+fdrtool_cutoff <- quantile(fdrtool_res$lfdr, 1-unname(fdrtool_res$param[1,'eta0']))
+locfdr_cutoff <- quantile(locfdr_res$fdr, 1-unname(locfdr_res$fp0['mlest','p0']))
+qvalue_cutoff <- quantile(qvalue_res$lfdr, 1-qvalue_res$pi0)
+
+classification_metrics_cutoff_pi0hat = rbind(
+  classification_metrics(
+    method = 'fdrSAFE',
+    fdr = fdrSAFE_res$fdr, 
+    pi0 = fdrSAFE_res$pi0,
+    test_statistics = platinum_data$statistics,
+    truth = platinum_data$fold_change$DE, 
+    cutoff = fdrSAFE_cutoff
+  ),
+  classification_metrics(
+    'locfdr',
+    locfdr_res$fdr,
+    locfdr_res$fp0['mlest','p0'],
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = locfdr_cutoff
+  ),
+  classification_metrics(
+    'fdrtool',
+    fdrtool_res$lfdr, 
+    fdrtool_res$param[1,'eta0'],
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = fdrtool_cutoff
+  ),
+  classification_metrics(
+    'qvalue',
+    qvalue_res$lfdr, 
+    qvalue_res$pi0,
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = qvalue_cutoff
+  )
+)
+
+classification_metrics_cutoff_pi0hat
+```
+
+#### cutoff based on $\pi_0$
+
+```{r}
+pi0 = mean(platinum_data$fold_change$DE==0)
+fdrSAFE_cutoff <- quantile(fdrSAFE_res$fdr, 1-pi0)
+fdrtool_cutoff <- quantile(fdrtool_res$lfdr, 1-pi0)
+locfdr_cutoff <- quantile(locfdr_res$fdr, 1-pi0)
+qvalue_cutoff <- quantile(qvalue_res$lfdr, 1-pi0)
+
+classification_metrics_cutoff_pi0 = rbind(
+  classification_metrics(
+    method = 'fdrSAFE',
+    fdr = fdrSAFE_res$fdr, 
+    pi0 = fdrSAFE_res$pi0,
+    test_statistics = platinum_data$statistics,
+    truth = platinum_data$fold_change$DE, 
+    cutoff = fdrSAFE_cutoff
+  ),
+  classification_metrics(
+    'locfdr',
+    locfdr_res$fdr,
+    locfdr_res$fp0['mlest','p0'],
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = locfdr_cutoff
+  ),
+  classification_metrics(
+    'fdrtool',
+    fdrtool_res$lfdr, 
+    fdrtool_res$param[1,'eta0'],
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = fdrtool_cutoff
+  ),
+  classification_metrics(
+    'qvalue',
+    qvalue_res$lfdr, 
+    qvalue_res$pi0,
+    platinum_data$statistics,
+    platinum_data$fold_change$DE, 
+    cutoff = qvalue_cutoff
+  )
+)
+
+classification_metrics_cutoff_pi0
+```

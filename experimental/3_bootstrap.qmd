@@ -1,0 +1,132 @@
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(tidyverse)
+library(ggplot2)
+library(glue)
+
+results_dir = "results"
+figures_dir = "figures"
+
+metrics <- read.csv(file.path(results_dir, "bootstrap_fdr_metrics.csv"))
+pi0 <- read.csv(file.path(results_dir, "bootstrap_pi0_metrics.csv"))
+calib <- read.csv(file.path(results_dir, "bootstrap_calib_metrics.csv"))
+
+max(pi0$b)
+length(unique(pi0$b))
+
+color_list = list(
+  "fdrSAFE" = "#D55E00",
+  "locfdr" = "#56B4E9",
+  "fdrtool" = "#009E73",
+  "qvalue" = "#0072B2",
+  "grid" = "#E69F00",
+  "ensemble" = "#CC79A7",
+  "ensemble all" = "#F0E442",
+  "oracle" = "#000000",
+  "oracle ensemble" = "#999999"
+)
+
+methods_order = c('fdrSAFE','locfdr','fdrtool','qvalue')
+
+names = data.frame(
+    levels = c('Fdr.MSE','brier','pr','roc','pi0'),
+    labels = c('"Fdr RMSE"','"Brier Score"','"PR AUC"','"ROC AUC"','hat(pi)[0]')
+)
+
+optimal = data.frame(
+    metric = factor(names$levels, levels = names$levels, labels = names$labels),
+    value = c(0, 0, 1, 1, 0.64)
+)
+```
+
+```{r}
+dat <- pi0 %>%
+    pivot_longer(3:7, names_to = 'method', values_to = 'pi0') %>%
+    dplyr::select(-X) %>%
+    filter(method != 'true') %>%
+    merge(
+        metrics %>%
+        mutate(b = `X.1`) %>%
+        mutate(`Fdr.MSE` = sqrt(`Fdr.MSE`)) %>%
+        dplyr::select(-X, -`X.1`)
+    ) %>%
+    mutate(
+        method = ifelse(method == 'gridsemble', 'fdrSAFE', method)
+    ) %>%
+    pivot_longer(3:7, names_to = 'metric', values_to = 'value') %>%
+    mutate(
+        value = as.numeric(value),
+        metric = factor(metric, levels = names$levels, labels = names$labels)
+    ) 
+
+dat %>%
+    mutate(
+        method = factor(method, levels = methods_order)
+    ) %>%
+    ggplot(aes(x = value, y = method, color = method, fill = method)) +
+    facet_grid(cols = vars(metric), scales = 'free', labeller = label_parsed) +
+    geom_vline(
+        data = optimal, aes(xintercept = value)
+    ) +
+    geom_boxplot(alpha = 0.2) +
+    theme_bw() +
+    theme(
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_blank(),
+        legend.title = element_blank(),
+        legend.position = 'bottom'
+    ) +
+     scale_fill_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    scale_color_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    )
+ggsave(file.path(figures_dir, "boostrap_metrics.png"), height = 4, width = 8)
+```
+
+```{r}
+all_data_metrics <- read.csv(file.path(results_dir, "platinum_fdr_metrics.csv"))
+dat %>%
+    mutate(
+        method = factor(method, levels = methods_order)
+    ) %>%
+    ggplot(aes(x = value, y = method, color = method, fill = method)) +
+    facet_grid(cols = vars(metric), scales = 'free', labeller = label_parsed) +
+    geom_vline(
+        data = optimal, aes(xintercept = value)
+    ) +
+    geom_boxplot(alpha = 0.2) +
+    theme_bw() +
+    theme(
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_blank(),
+        legend.title = element_blank(),
+        legend.position = 'bottom'
+    ) +
+     scale_fill_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    scale_color_manual(
+        breaks = names(color_list),
+        values = unlist(color_list)
+    ) +
+    geom_boxplot(
+        data = all_data_metrics %>%
+            dplyr::select(-X) %>%
+            mutate(Fdr.MSE = sqrt(Fdr.MSE)) %>%
+            pivot_longer(2:6, names_to = 'metric', values_to = 'value') %>%
+            mutate(
+                value = as.numeric(value),
+                metric = factor(metric, levels = names$levels, labels = names$labels)
+            ),
+        aes(x = value, y = method, color = 'grey', fill = 'grey'),
+        alpha = 1
+    )
+ggsave(file.path(figures_dir, "boostrap_metrics_withobs.png"), height = 4, width = 8)
+```

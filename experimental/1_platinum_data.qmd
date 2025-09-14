@@ -1,0 +1,203 @@
+---
+title: "fdrSAFE on Platinum Spike Dataset - Dataset"
+author: "Jenna Landy"
+date: "2025-09-13"
+format:
+  pdf
+---
+
+```{r message = FALSE}
+.libPaths("~/apps/R_4.1.0/")
+library(tidyverse)
+library(tibble)
+
+library(GEOquery)
+library(affy)
+library(genefilter)
+
+data_dir = "data"
+
+source("helpers.R")
+```
+
+# Data
+
+Access data with `GEOQuery` R package. This will download some files in a directory named `GSE21344`. The `geo` object contains an `ExpressionSet` object, but we see that it is empty. Instead, we load expression data from the downloaded files.
+```{r}
+geo <- GEOquery::getGEO("GSE21344")
+class(geo$GSE21344_series_matrix.txt.gz)
+dim(exprs(geo$GSE21344_series_matrix.txt.gz))
+```
+
+## Expression Data
+Expression data for each sample is in a supplementary file. The `getGEOSuppFiles` function downloads these files and saves them in `GSE21344_RAW.tar` in sub-directory called `GSE21344`. We can decompress this with the `untar` function, and save each contained file into the same sub-directory by setting `exdir = "GSE21344"`.
+```{r}
+# download supplemental files from GEO browser
+dir = "GSE21344"
+supp <- getGEOSuppFiles(dir)
+untar(
+  paste0(dir,"/GSE21344_RAW.tar"), 
+  exdir = dir
+)
+```
+
+Each sample has a respective `.cel.gz` file. We can read all these files at once with the `affy::ReadAffy()` function, which returns an `AffyBatch` object.
+```{r}
+# directory of RAW supplementary files downloaded
+# there is a .cel file for each observation
+files =  list.files(dir)
+files = files[endsWith(files, 'cel.gz')]
+Data = affy::ReadAffy(
+  filenames = paste(dir, files, sep = '/')
+)
+class(Data)
+```
+
+The `affy::rma()` function converts an `AffyBatch` object into an `ExpressionSet` object using the robust multi-array average (RMA) expression measure.
+```{r}
+eset = affy::rma(Data)
+class(eset)
+```
+
+Expression data can be accessed with `Biobase::exprs()` function.
+```{r}
+expression = Biobase::exprs(eset)
+
+# remove .cel.gz from column names
+colnames(expression) <- stringr::str_replace(colnames(expression),'.cel.gz','')
+
+expression[1:5, 1:2]
+```
+
+```{r}
+paste(dim(expression), c("genes", "samples"))
+```
+
+## Phenotype Data
+
+We can extract phenotype data from the `geo$GSE21344_series_matrix.txt.gz` object with the `Biobase::pData()` function.
+```{r}
+pheno <- Biobase::pData(geo$GSE21344_series_matrix.txt.gz)
+```
+
+We first check that this phenotype data is in the same order as the expression data.
+```{r}
+all(colnames(expression) == rownames(pheno))
+all(colnames(expression) == pheno$geo_accession)
+```
+
+We can extract condition and technical replicate information from the `description.4` column of this data frame.
+```{r}
+labels <- pheno %>%
+  select(geo_accession, description.4) %>%
+  mutate(
+    condition = substring(description.4, 1, 1),
+    sample = substring(description.4, 2, 2),
+    replicate = substring(description.4, 3)
+  )
+head(labels)
+```
+
+We average across technical replicates. The new data frame we create here `expression_per_sample` has one row representing one sample (averaged across three technical replicates). Column names are the conditions (A or B).
+```{r}
+labels_grouped = labels %>%
+  group_by(condition, sample) %>%
+  summarize(
+    id = list(geo_accession),
+    .groups = "keep"
+  ) %>%
+  ungroup() %>%
+  select(-sample) %>%
+  deframe()
+
+expression_per_sample <- lapply(
+    labels_grouped, 
+    function(ids) {
+      rowMeans(expression[,ids])
+    }
+  ) %>%
+  do.call(cbind, .)
+
+dim(expression_per_sample)
+expression_per_sample[1:2,]
+```
+
+## Fold-Change Data 
+The fold-change data that tells us what probes are differentially expressed is in a supplemental file of the Platinum Spike Paper and can be read directly from the web.
+```{r}
+fold_change = read.table("https://static-content.springer.com/esm/art%3A10.1186%2F1471-2105-11-285/MediaObjects/12859_2010_3742_MOESM5_ESM.txt")
+
+colnames(fold_change) = c('affy','FC')
+
+head(fold_change)
+```
+
+Here we check that each probes in our expression data is also in this fold-change dataset.
+```{r}
+setequal(
+  rownames(expression_per_sample), 
+  fold_change$affy
+)
+```
+
+The platinum spike paper notes that empty probe sets were assigned with the value zero. "MC" means the corresponding probe set is assigned to multiple clones. "MF" means the clone assigned to the particular probe set is present in multiple pools and therefore has multiple fold change values. We filter out all probes that fall in one of these three categories.
+```{r}
+fold_change_FILETERED <- fold_change %>%
+  filter(FC != '0' & FC != 'MC' & FC != 'MF') %>%
+  mutate(FC = as.numeric(FC))
+
+dim(expression_per_sample)
+
+# this also makes expression match order of fold change
+expression_per_sample_FILTERED <- expression_per_sample[fold_change_FILETERED$affy,]
+
+dim(expression_per_sample_FILTERED)
+```
+
+Now we can look at the ranges of fold changes, and define "differentially expressed" genes as those with FC $\ne$ 1.
+```{r}
+hist(
+  fold_change_FILETERED$FC, 
+  main = "Fold Change Counts", 
+  xlab = "FC"
+)
+
+fold_change_FILETERED <- fold_change_FILETERED %>%
+  mutate(
+    DE = FC != 1
+  )
+table(fold_change_FILETERED$DE)
+pi0 = mean(fold_change_FILETERED$DE == 0)
+pi0
+```
+
+Now we perform two-sample t-tests and plot the resulting test statistics.
+```{r}
+y = as.factor(colnames(expression_per_sample_FILTERED))
+t_statistics = sapply(
+  1:nrow(expression_per_sample_FILTERED), 
+  function(i) {
+    test = t.test(expression_per_sample_FILTERED[i,y == 'A'], expression_per_sample_FILTERED[i,y == 'B'])
+    return(test$statistic)
+  }
+)
+
+hist(t_statistics, main = "Test Statistics")
+```
+
+## Save
+
+```{r}
+platinum_data <- list(
+  expression = expression_per_sample_FILTERED,
+  fold_change = fold_change_FILETERED,
+  pheno = pheno,
+  statistics = t_statistics,
+  Fdr = get_true_Fdr(
+    t_statistics, 
+    fold_change_FILETERED$DE
+  )
+)
+
+save(platinum_data, file = file.path(data_dir, "1_platinum_data.RData"))
+```
